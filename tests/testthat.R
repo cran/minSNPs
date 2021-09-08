@@ -1,0 +1,5 @@
+library(testthat)
+library(minSNPs)
+library(Biostrings)
+library(withr)
+test_check("minSNPs")
