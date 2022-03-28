@@ -70,7 +70,8 @@ write_fasta <- function(seqc, filename) {
         r <- l - (60 * q)
         if (q > 0) {
             sapply(seq_len(q), function(x) {
-                writeLines(this_seq[(60 * (x - 1) + 1):(60 * x)], outfile)
+                writeLines(paste(this_seq[(60 * (x - 1) + 1):(60 * x)],
+                    collapse = ""), outfile)
             })
         }
         if (r > 0) {
@@ -135,7 +136,7 @@ flag_allele <- function(seqc, bp=BiocParallel::SerialParam()) {
 #' @keywords internal
 #' @return Will return a list of positions that need to be ignored.
 flag_position <- function(pro_seqc, dash_ignore=TRUE,
-    accepted_char=c("A", "C", "T", "G"), ignore_case=TRUE) {
+    accepted_char=c("A", "C", "T", "G"), ignore_case=TRUE, bp = SerialParam()) {
 
     if (dash_ignore == FALSE) {
         accepted_char <- c(accepted_char, "-")
@@ -148,26 +149,32 @@ flag_position <- function(pro_seqc, dash_ignore=TRUE,
         })
     }
 
-    ignored_position <- lapply(as.list(pro_seqc), function(iso, charset) {
+    ignored_position <- bplapply(as.list(pro_seqc), function(iso, charset) {
         return(which(! as.vector(iso) %in% charset))
-    }, charset = accepted_char)
+    }, charset = accepted_char, BPPARAM = bp)
 
     result <- sort(unique(unlist(ignored_position)))
 
     return(result)
 }
 
-#' \code{remove_dup_allele}
+#' \code{remove_dup_isolate}
 #'
 #' @description
-#' \code{remove_dup_allele} is used to remove allele with the same name.
+#' \code{remove_dup_isolate} is used to remove isolate with the same name.
 #' @inheritParams get_usual_length
 #' @keywords internal
 #' @return return the list of samples where only the first instance of
-#' the allele with the duplicate name is kept
-remove_dup_allele <- function(seqc) {
+#' the isolate with the duplicate name is kept
+remove_dup_isolate <- function(seqc) {
     all_sequences <- names(seqc)
-    unique_sequences <- which(unique(all_sequences) %in% all_sequences)
+    unique_sequences <- unique(all_sequences)
+
+    if (any(duplicated(all_sequences))) {
+        dups <- unique(all_sequences[duplicated(all_sequences)])
+        cat("Found multiple isolates with same names, only first is taken:\n",
+            paste(dups, collapse = ", "), "\n\n", sep = "")
+    }
     return(seqc[unique_sequences])
 }
 
@@ -186,7 +193,7 @@ process_allele <- function(seqc, bp=BiocParallel::SerialParam(),
     dash_ignore=TRUE, accepted_char=c("A", "C", "T", "G"), ignore_case=TRUE) {
 
     processed <- list()
-    seqc <- remove_dup_allele(seqc)
+    seqc <- remove_dup_isolate(seqc)
     ignored <- flag_allele(seqc, bp)
     processed$seqc <- as.list(seqc)
     processed$ignored_allele <- ignored
@@ -211,11 +218,185 @@ process_allele <- function(seqc, bp=BiocParallel::SerialParam(),
 
     ignored_position <- flag_position(processed$seqc,
         dash_ignore = dash_ignore, accepted_char = accepted_char,
-        ignore_case = ignore_case)
+        ignore_case = ignore_case, bp = bp)
 
     cat("Ignored ", length(ignored_position), " positions", "\n")
 
     processed$ignored_position <- ignored_position
     class(processed) <- "processed_seqs"
     return(processed)
+}
+
+
+translation <- list(
+    M = c("A", "C"),
+    R = c("A", "G"),
+    W = c("A", "T"),
+    S = c("C", "G"),
+    Y = c("C", "T"),
+    K = c("G", "T"),
+    V = c("A", "C", "G"),
+    H = c("A", "C", "T"),
+    D = c("A", "G", "T"),
+    B = c("C", "G", "T")
+)
+
+#' \code{resolve_IUPAC_missing}
+#'
+#' @description
+#' \code{resolve_IUPAC_missing} is used to replace the
+#' ambiguity codes found in the sequences.
+#' @param seqc the sequences to be processed
+#' @param log_operation whether to log the operation
+#' @param log_file log file to write the operations
+#' @param max_ambiguity proportion of ambiguity codes to tolerate,
+#' -1 = ignore. Default to -1
+#' @param replace_method how to substitute the ambiguity codes,
+#' current supported methods:random and most_common, default to "random".
+#' @param N_is_any_base whether to treat N as any base or substitute it
+#' with one of the alleles found at the position.
+#' @param output_progress whether to output progress
+#' @importFrom utils txtProgressBar setTxtProgressBar
+#' @return Will return the processed sequences.
+#' @export
+resolve_IUPAC_missing <- function(seqc, log_operation = TRUE, # nolint
+    log_file = "replace.log", max_ambiguity = -1,
+    replace_method = "random", N_is_any_base = FALSE, output_progress = TRUE) { #nolint
+
+    accepted_char <- c("A", "C", "T", "G")
+
+    # Whether N should be randomly resolved to any of the accepted bases
+    # or if it should be 1 of the bases present in any of the isolates
+    if (N_is_any_base) {
+        translation[["N"]] <- accepted_char
+    }
+
+    # Logging all operation
+    if (log_operation) {
+        cat("Position\tIsolate\tOriginal\tReplaced\n",
+            file = log_file, append = FALSE)
+    }
+
+    if (output_progress) {
+        pb <- txtProgressBar(min = 0, max = length(seqc[[1]]),
+            initial = 0, style = 3)
+    }
+
+    if ((max_ambiguity == -1 || max_ambiguity == 1) &&
+        replace_method == "most_common") {
+        stop("most_common must have max_ambiguity < 1")
+    }
+
+    if (replace_method == "most_common") {
+        for (p in seq_len(length(seqc[[1]]))) {
+            # All the nucleotides at this position
+            nucleotides <- lapply(seqc, `[[`, p)
+            # These need to be modified
+            to_modify <- which(!nucleotides %in% accepted_char)
+
+            # These are valid
+            valids <- which(nucleotides %in% accepted_char)
+            # Most common base
+            valid_bases <- as.vector(unlist(nucleotides[valids]))
+            most_common <- names(sort(table(valid_bases), decreasing = TRUE)[1])
+
+            ambiguity_ratio <- (length(to_modify) / length(seqc))
+            if (ambiguity_ratio >= max_ambiguity) {
+                if (log_operation) {
+                    for (t in to_modify) {
+                        cat(p, "\t", names(seqc)[t], "\t", seqc[[t]][p],
+                            "\t", "Skipped - >= max_ambiguity", "\n",
+                            file = log_file, append = TRUE)
+                    }
+                }
+                if (output_progress) {
+                    setTxtProgressBar(pb, p)
+                }
+                next
+            }
+            if (log_operation) {
+                for (t in to_modify) {
+                    cat(p, "\t", names(seqc)[t], "\t", seqc[[t]][p],
+                        "\t", most_common, "\n",
+                        file = log_file, append = TRUE)
+                }
+            }
+            for (t in to_modify) {
+                seqc[[t]][p] <- most_common
+            }
+            if (output_progress) {
+                setTxtProgressBar(pb, p)
+            }
+        }
+
+    } else if (replace_method == "random") {
+        for (p in seq_len(length(seqc[[1]]))) {
+            # All the nucleotides at this position
+            nucleotides <- lapply(seqc, `[[`, p)
+            # These need to be modified
+            to_modify <- which(!nucleotides %in% accepted_char)
+
+            if (max_ambiguity > 0 && max_ambiguity < 1) {
+                ambiguity_ratio <- (length(to_modify) / length(seqc))
+                if (ambiguity_ratio >= max_ambiguity) {
+                    if (log_operation) {
+                        for (t in to_modify) {
+                            cat(p, "\t", names(seqc)[t], "\t", seqc[[t]][p],
+                                "\t", "Skipped - >= max_ambiguity", "\n",
+                                file = log_file, append = TRUE)
+                        }
+                    }
+                    if (output_progress) {
+                        setTxtProgressBar(pb, p)
+                    }
+                    next
+                }
+            }
+
+            # All other valid uncleotides
+            valid_replacements <- unlist(
+                unique(
+                    nucleotides[which(nucleotides %in% accepted_char)]
+                )
+            )
+
+            # Iterate through isolate that needs to be modified at position p
+            for (t in to_modify) {
+
+                if (seqc[[t]][p] == "N") {
+                    # If N is any bases, it can be any of the accepted characters #nolint
+                    if (N_is_any_base) {
+                        candidates <- unique(
+                            c(translation[[seqc[[t]][p]]],
+                            valid_replacements)
+                        )
+                    } else {
+                        # Otherwise, it is one of the valid bases
+                        # shown in at least one of the isolates
+                        candidates <- valid_replacements
+                    }
+                } else {
+                    # If it's not N, just refer to the translation list
+                    candidates <- unique(translation[[seqc[[t]][p]]])
+                }
+                replacement <-
+                    sample(candidates, 1, replace = TRUE)
+                if (log_operation) {
+                    cat(p, "\t", names(seqc)[t], "\t", seqc[[t]][p],
+                        "\t", replacement, "\n",
+                        file = log_file, append = TRUE)
+                }
+                seqc[[t]][p] <- replacement
+            }
+            if (output_progress) {
+                setTxtProgressBar(pb, p)
+            }
+        }
+    } else {
+        stop("Unknown replace method")
+    }
+    if (output_progress) {
+        close(pb)
+    }
+    return(seqc)
 }

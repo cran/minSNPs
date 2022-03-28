@@ -5,7 +5,6 @@
 #' @param seqc list of sequences
 #' @param ordered_index list of indexes for the pattern in the order
 #' @param append_to existing patterns to append to
-#' @keywords internal
 #' @return Will return concatenated list of string for searching.
 generate_pattern <- function(seqc, ordered_index=c(), append_to=list()) {
     pattern <- append_to
@@ -27,6 +26,7 @@ generate_pattern <- function(seqc, ordered_index=c(), append_to=list()) {
 #' @param pattern list of sequences
 #' @param goi group of interest
 #' @return Will return the dissimilarity index of the list of patterns.
+#' @export
 calculate_percent <- function(pattern, goi) {
     target_seqs <- character()
     for (isolate in goi) {
@@ -41,7 +41,7 @@ calculate_percent <- function(pattern, goi) {
     isolate_w_goi_pattern <- length(which(pattern %in% target_seqs))
     failed_to_discriminate <- isolate_w_goi_pattern - length(goi)
     result <- 1 - (failed_to_discriminate / (length(pattern) - length(goi)))
-    return(result)
+    return(list(result = result))
 }
 
 #' \code{calculate_simpson}
@@ -52,6 +52,7 @@ calculate_percent <- function(pattern, goi) {
 #' the more diverse the population.
 #' @inheritParams calculate_percent
 #' @return Will return the Simpson's index of the list of patterns.
+#' @export
 calculate_simpson <- function(pattern) {
     unique_sequences <- unlist(unique(pattern))
     no_isolate_in_group <- list()
@@ -69,11 +70,13 @@ calculate_simpson <- function(pattern) {
         (length(pattern) - 1)
 
     if (d_numerator == 0 || d_denominator == 0) {
-        return(0)
+        ind <- 0
+    } else{
+        ind <- (d_numerator / d_denominator)
     }
 
-    simpson_index <- 1 - (d_numerator / d_denominator)
-    return(simpson_index)
+    simpson_index <- 1 - ind
+    return(list(result = simpson_index))
 }
 
 #' \code{check_percent}
@@ -83,11 +86,21 @@ calculate_simpson <- function(pattern) {
 #' \code{calculate_percent} are all present.
 #' @param list_of_parameters is a list of parameter passed
 #' to functions that will perform the calculation
+#' @return TRUE if goi exists, else FALSE
+#' @export
 check_percent <- function(list_of_parameters) {
     return(length(list_of_parameters[["goi"]]) > 0)
 }
 
-
+#' \code{view_simpson}
+#'
+#' @description
+#' \code{view_simpson} is used to present the result of selected
+#' SNPs set based on Simpson's Index.
+#' @param result is the result from \code{find_optimised_snps}
+#' @param ... other optional parameters
+#' @return formatted result list to be saved or presented.
+#' @export
 view_simpson <- function(result, ...) {
     additional_args <- list(...)[[1]]
     if (exists(result$seqc_name)) {
@@ -97,7 +110,7 @@ view_simpson <- function(result, ...) {
     } else {
         stop("Unable to find the sequences used to generate result")
     }
-    if (class(seqc) == "processed_seqs") {
+    if (inherits(seqc, "processed_seqs")) {
         seqc <- seqc$seqc
     }
 
@@ -109,7 +122,7 @@ view_simpson <- function(result, ...) {
         result_levels <- names(results[[n]])
         result_max_depth <- result_levels[length(result_levels)]
         ordered_index <- as.numeric(
-            strsplit(result_max_depth, split = ",")[[1]])
+            strsplit(result_max_depth, split = ", ")[[1]])
         patterns <- generate_pattern(seqc, ordered_index = c(ordered_index))
         unique_sequences <- unlist(unique(patterns))
 
@@ -123,6 +136,15 @@ view_simpson <- function(result, ...) {
     return(isolates_in_groups)
 }
 
+#' \code{view_percent}
+#'
+#' @description
+#' \code{view_percent} is used to present the result of selected
+#' SNPs set based on Simpson's Index.
+#' @param result is the result from \code{find_optimised_snps}
+#' @param ... other optional parameters
+#' @return formatted result list to be saved or presented.
+#' @export
 view_percent <- function(result, ...) { # nolint
     additional_args <- list(...)[[1]]
     if (exists(result$seqc_name) && !is.null(result$goi)) {
@@ -133,7 +155,7 @@ view_percent <- function(result, ...) { # nolint
         stop("Unable to find the sequences used to generate result OR GOI")
     }
 
-    if (class(seqc) == "processed_seqs") {
+    if (inherits(seqc, "processed_seqs")) {
         seqc <- seqc$seqc
     }
     results <- result$results
@@ -147,7 +169,7 @@ view_percent <- function(result, ...) { # nolint
         result_levels <- names(results[[n]])
         result_max_depth <- result_levels[length(result_levels)]
         ordered_index <- as.numeric(
-            strsplit(result_max_depth, split = ",")[[1]])
+            strsplit(result_max_depth, split = ", ")[[1]])
         patterns <- generate_pattern(seqc, ordered_index = c(ordered_index))
         unique_sequences <- unlist(unique(patterns))
 
@@ -157,8 +179,19 @@ view_percent <- function(result, ...) { # nolint
                 target_seqs <- c(target_seqs, patterns[[isolate]])
             }
         }
-        isolates_w_goi_pattern <- names(which(patterns %in% target_seqs))
-        failed_to_discriminate <- which(!isolates_w_goi_pattern %in% goi)
+        isolates_w_goi_pattern <- names(patterns)[
+            which(patterns %in% target_seqs)]
+        failed_to_discriminate <- isolates_w_goi_pattern[
+            which(!isolates_w_goi_pattern %in% goi)]
+
+        pattern_failed <- patterns[failed_to_discriminate]
+
+        failed_to_discriminate <- sapply(failed_to_discriminate,
+        function(failed_name, pattern) {
+            return(paste(failed_name, " (", pattern[[failed_name]], ")",
+            sep = ""))
+            },
+        pattern = pattern_failed, USE.NAMES = FALSE)
 
         for (seqs in unique_sequences) {
             if (seqs %in% target_seqs) {
@@ -186,7 +219,8 @@ view_percent <- function(result, ...) { # nolint
 #' @return a list, including the function to calculate the
 #' metric based on a position (`calc`), and function to check for
 #' additional parameters the function need (`args`)
-get_metric_fun <- function(metric_name) {
+#' @export
+get_metric_fun <- function(metric_name = "") {
     if (! exists("MinSNPs_metrics")) {
         MinSNPs_metrics <- list( #nolint
             "percent" = list("calc" = calculate_percent,
@@ -194,6 +228,9 @@ get_metric_fun <- function(metric_name) {
             "simpson" = list("calc" = calculate_simpson,
                 "view" = view_simpson)
         )
+    }
+    if (metric_name == "") {
+        return(MinSNPs_metrics)
     }
     return(MinSNPs_metrics[[metric_name]])
 }
@@ -204,7 +241,8 @@ get_metric_fun <- function(metric_name) {
 #' \code{find_optimised_snps} is used to find optimised SNPs set.
 #' @param seqc list of sequences, either passed directly from
 #' \code{process_allele} or \code{read_fasta} or equivalence
-#' @param bp BiocParallel backend. Rule of thumbs: use MulticoreParam()
+#' @param bp BiocParallel backend.
+#' Rule of thumbs: use MulticoreParam(workers = ncpus - 2)
 #' @param metric either `simpson` or `percent`
 #' @param goi group of interest, if creteria is percent,
 #' must be specified, ignored otherwise
@@ -233,7 +271,7 @@ find_optimised_snps <- function(seqc, metric = "simpson", goi = c(),
     included_reached_1 <- FALSE
     additional_exclude <- numeric()
     # Automatically exclude ignored positions from processed sequences
-    if (class(seqc) == "processed_seqs") {
+    if (inherits(seqc, "processed_seqs")) {
         excluded_positions <- c(excluded_positions, seqc[["ignored_position"]])
         sequences <- seqc[["seqc"]]
     } else {
@@ -255,7 +293,7 @@ find_optimised_snps <- function(seqc, metric = "simpson", goi = c(),
     # Check if any of the included positions are in excluded positions
     if (any(included_positions %in% excluded_positions)) {
         errors <- included_positions[included_positions %in% excluded_positions]
-        stop(paste(errors, collapse = ","),
+        stop(paste(errors, collapse = ", "),
             " found in both included & excluded positions")
     }
 
@@ -272,7 +310,7 @@ find_optimised_snps <- function(seqc, metric = "simpson", goi = c(),
     }
 
     # Perform analysis on the included positions first
-    existing_pattern <- list()
+    # existing_pattern <- list()
     if (included) {
         if (iterate_included) {
             iterations <- list()
@@ -282,23 +320,23 @@ find_optimised_snps <- function(seqc, metric = "simpson", goi = c(),
             scores <- bplapply(iterations, cal_met_snp, metric = metric_fun,
                 seqc = sequences, all_parameters, BPPARAM = bp)
 
-            existing_pattern <- scores[[
-                length(included_positions)]][["patterns"]]
+            #existing_pattern <- scores[[
+            #    length(included_positions)]][["patterns"]]
             scores <- bplapply(scores, function(score) {
                 return(score[["result"]])
             }, BPPARAM = bp)
-            names(scores) <- bplapply(iterations, paste, collapse = ",",
+            names(scores) <- bplapply(iterations, paste, collapse = ", ",
                 BPPARAM = bp)
             result <- scores
         } else {
             score <- cal_met_snp(included_positions, metric_fun,
                     sequences, all_parameters)
-            result[[paste(included_positions, collapse = ",")]] <-
+            result[[paste(included_positions, collapse = ", ")]] <-
                 score[["result"]]
-            existing_pattern <- score[["patterns"]]
+            #existing_pattern <- score[["patterns"]]
         }
     excluded_positions <- c(excluded_positions, included_positions)
-    if (result[[paste(included_positions, collapse = ",")]] >= 1) {
+    if (result[[paste(included_positions, collapse = ", ")]] >= 1) {
             included_reached_1 <- TRUE
         }
     }
@@ -308,14 +346,14 @@ find_optimised_snps <- function(seqc, metric = "simpson", goi = c(),
         ) {
         all_result <- list(result = result)
     } else {
-        all_parameters[["existing_pattern"]] <- existing_pattern
+        #all_parameters[["existing_pattern"]] <- existing_pattern
         branch_result <- branch_and_search(included_positions,
             c(additional_exclude, excluded_positions),  sequences, metric_fun,
             number_of_result, max_depth,
             bp, all_parameters)
         all_result <- bplapply(branch_result, function(branch_r, inc_r) {
             return(c(inc_r, branch_r))
-        }, inc_r = result)
+        }, inc_r = result, BPPARAM = SerialParam())
     }
 
     return(list(results = all_result,
@@ -348,12 +386,17 @@ branch_and_search <- function(starting_positions = c(),
     additional_args <- list(...)[[1]]
     current_level <- length(starting_positions)
     traversed <- list()
-    existing_pattern <- list()
-
+    #existing_pattern <- list()
+    output_progress <- ifelse(
+        is.null(additional_args[["output_progress"]]),
+    FALSE, additional_args[["output_progress"]])
     # Function to generate list of position to iterate through
     get_positions_to_search <- function(seqc_len, excluded_pos, traversed) {
         positions <- seq_len(seqc_len)
-        positions <- positions[! positions %in% c(excluded_pos, traversed)]
+        positions <- as.list(positions[! positions %in% c(excluded_pos, traversed)])
+        positions <- bplapply(positions, function(pos){
+            return(c(traversed, pos))
+        }) # Updated
         return(positions)
     }
 
@@ -366,7 +409,7 @@ branch_and_search <- function(starting_positions = c(),
             BPPARAM = bp)
     depth_1 <- bplapply(scores, function(score) {
             return(score[["result"]])
-    }, BPPARAM = bp)
+    }, BPPARAM = SerialParam())
 
     # Sorting for selection at this depth
     names(depth_1) <- positions
@@ -377,13 +420,13 @@ branch_and_search <- function(starting_positions = c(),
 
     # For each result, create the 1st selected SNP
     for (n in seq_len(number_of_result)) {
-        traversed[[n]] <- c(starting_positions,
+        traversed[[n]] <- c(#starting_positions,
             positions[position_order[n]][[1]])
         result_d1[[
-                paste(traversed[[n]], collapse = ",")]] <-
+                paste(traversed[[n]], collapse = ", ")]] <-
                     depth_1[position_order][[n]]
-        existing_pattern[[n]] <- scores[[position_order[n]
-            ]][["patterns"]]
+        #existing_pattern[[n]] <- scores[[position_order[n]
+        #    ]][["patterns"]]
         selected_positions <- c(selected_positions,
             positions[position_order[n]][[1]])
     }
@@ -397,8 +440,9 @@ branch_and_search <- function(starting_positions = c(),
             # max_depth has not been reached AND
             # if the index is not already 1
             if (max_depth - 1 > 0 &&
-                result_d1[[paste(traversed[[n]], collapse = ",")]] < 1) {
-                additional_args[["existing_pattern"]] <- existing_pattern[[n]]
+                result_d1[[paste(traversed[[n]], collapse = ", ")]] < 1) {
+                additional_args[["output_progress"]] <- FALSE
+                #additional_args[["existing_pattern"]] <- existing_pattern[[n]]
                 multi_result[[paste("result", n)]] <- branch_and_search(
                     starting_positions = c(starting_positions,
                         selected_positions[n]),
@@ -412,6 +456,9 @@ branch_and_search <- function(starting_positions = c(),
             multi_result[[paste("result", n)]] <- c(
                 result_d1[n],
                 multi_result[[paste("result", n)]][["result"]])
+            if (output_progress) {
+                cat("Generated", n, "result\n")
+            }
         }
         return(multi_result)
     } else {
@@ -420,7 +467,7 @@ branch_and_search <- function(starting_positions = c(),
         while (((current_level - length(starting_positions)) < max_depth) &&
                (depth_1[position_order][[1]] < 1))  {
 
-            additional_args[["existing_pattern"]] <- existing_pattern[[1]]
+            #additional_args[["existing_pattern"]] <- existing_pattern[[1]]
             positions <- get_positions_to_search(length(seqc[[1]]),
                 c(excluded_positions, selected_positions[1]),
                 traversed[[1]])
@@ -431,19 +478,19 @@ branch_and_search <- function(starting_positions = c(),
                     BPPARAM = bp)
             depth_1 <- bplapply(scores, function(score) {
                     return(score[["result"]])
-            }, BPPARAM = bp)
+            }, BPPARAM = SerialParam())
 
             names(depth_1) <- positions
             position_order <- order(unlist(depth_1), decreasing = TRUE)
 
 
-            traversed[[1]] <- c(traversed[[1]],
+            traversed[[1]] <- c(#traversed[[1]],
                 positions[position_order[1]][[1]])
             result_d1[[
-                    paste(traversed[[1]], collapse = ",")]] <-
+                    paste(traversed[[1]], collapse = ", ")]] <-
                         depth_1[position_order][[1]]
-            existing_pattern[[1]] <- scores[[position_order[1]
-                ]][["patterns"]]
+            #existing_pattern[[1]] <- scores[[position_order[1]
+            #    ]][["patterns"]]
 
             current_level <- current_level + 1
         }
@@ -477,6 +524,7 @@ check_multistate <- function(position, sequences) {
 #' @return return the value at that position,
 #' as well as base pattern for next iteration.
 #' @keywords internal
+#' @export
 cal_met_snp <- function(position, metric, seqc, ...) {
     additional_args <- list(...)[[1]]
     if ("existing_pattern" %in% names(additional_args)) {
@@ -489,8 +537,23 @@ cal_met_snp <- function(position, metric, seqc, ...) {
     metric_expected_args <- formals(metric_function)
     all_expected_args <- names(additional_args)[
         names(additional_args) %in% names(metric_expected_args)]
+    if (!all(names(metric_expected_args)
+        [!names(metric_expected_args) == "pattern"] %in%
+            all_expected_args)) {
+
+            stop("Metric function requires additional arguments: ",
+              paste(names(metric_expected_args)[(!names(metric_expected_args)
+              %in% all_expected_args) &
+              (!names(metric_expected_args) == "pattern")], collapse = ", "))
+    }
     sub_args <- additional_args[all_expected_args]
     sub_args[["pattern"]] <- pattern
     res <- do.call(metric_function, args = sub_args)
-    return(list(result = res, patterns = pattern))
+    if ("get_addn" %in% names(additional_args)) {
+        if (additional_args[["get_addn"]]) {
+            return(list(result = res$result,
+                additional_data = res$additional_data))
+        }
+    }
+    return(list(result = res$result))#, patterns = pattern)) ## Updated this
 }
