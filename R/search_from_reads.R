@@ -59,6 +59,9 @@ search_from_fastq_reads <- function(fastq_file, search_tables, skip_n_reads = 0,
     simplify_id = TRUE, output_read_length = TRUE, bp = MulticoreParam()) {
     
     reads <- read_sequences_from_fastq(fastq_file, quality_offset = quality_offset, max_n_reads = max_n_reads, skip_n_reads = skip_n_reads, bp = bp)
+    if (is.null(reads)){
+        return(NULL)
+    }
 
     read_ids <- names(reads)
     if (simplify_id){
@@ -130,11 +133,117 @@ search_from_fastq_reads <- function(fastq_file, search_tables, skip_n_reads = 0,
         if (output_temp) {
             result_file <- file.path(result_folder,
             paste0(id, "_", search_id, ".csv"))
-            write.csv(result_df, result_file, sep = "\t", row.names = FALSE)
+            write.csv(result_df, result_file, row.names = FALSE)
         }
         return(result_df)
     }, output_temp = output_temp_result, search_tables = search_tables, result_folder = temp_result_folder,
     id = basename(fastq_file), reads = all_reads, qualities = all_qualities, BPPARAM = bp)
+    if (progress) {
+        bp$progressbar <- old_pr
+    }
+    names(temp_result) <- search_tables$sequence
+    result <- list(result = temp_result,
+        read_length = read_length_data)
+    class(result) <- "fastq_search_result"
+
+    return(result)
+}
+
+#' \code{search_from_reads}
+#'
+#' @description
+#' \code{search_from_reads} identify the matches
+#' from a list of search strings
+#' @param all_reads The reads containing the runs to search from
+#' @param search_tables a dataframe with the following columns:
+#' - ["id"],"type",["sequence"],"strand","result","extra","match_ref_seq"
+#' @param bp BiocParallel backend to use for parallelization
+#' @param all_qualities quality data, default to NULL
+#' @param progress whether to show the progress bar
+#' @param ID the ID to use, default to S1
+#' @param output_read_length whether to output the read length, NULL - do not output; csv - output to csv file; data - output to result
+#' @param output_temp_result whether to output the temporary results
+#' @param temp_result_folder directory to output the temporary results
+#' @return will return a list of dataframe containing: -
+#' `search_id`, `sequence`, `reads`, `raw_match`, `mean_qualities`, `indexes`.
+#' @importFrom BiocParallel bplapply MulticoreParam
+#' @export
+search_from_reads <- function(all_reads, search_tables, progress = TRUE, ID = "S1",
+    all_qualities = NULL, output_temp_result = TRUE, temp_result_folder = "./temp_results",
+    output_read_length = TRUE, bp = MulticoreParam()) {
+    
+    read_ids <- names(all_reads)
+
+    if (is.null(all_qualities)) {
+        all_qualities <- lapply(all_reads, function(seq) {
+            return(rep(33, nchar(seq)))
+        })
+    }
+
+    if (output_temp_result) {
+        if (!dir.exists(temp_result_folder)) {
+            dir.create(temp_result_folder)
+        }
+    }
+
+    read_length_data <- NULL
+    if (output_read_length) {
+        reads_length <- nchar(all_reads)
+        read_length_data <- data.frame(reads_id = read_ids, reads_length = as.numeric(reads_length))
+        
+        if (output_temp_result){
+            write.csv(read_length_data,
+                paste0(temp_result_folder, "/", ID, "_read_lengths.csv"),
+                row.names = FALSE)
+        }
+    }
+
+    names(all_reads) <- paste(read_ids, "_+", sep = "")
+    reads_rc <- bplapply(all_reads, function(seq) {
+        return(reverse_complement(seq))
+    }, BPPARAM = bp)
+    qualities_rc <- bplapply(all_qualities, function(seq) {
+        return(rev(seq))
+    }, BPPARAM = bp)
+ 
+    names(reads_rc) <- paste(read_ids, "_-", sep = "")
+    all_reads <- c(all_reads, reads_rc)
+    all_qualities <- c(all_qualities, qualities_rc)
+    names(all_qualities) <- names(all_reads)
+    old_pr <- bp$progressbar
+    if (progress) {
+        bp$progressbar <- progress
+    }
+    print("SEARCHING ...")
+    temp_result <- bplapply(seq_len(nrow(search_tables)), function(i, search_tables, reads, qualities, output_temp, result_folder, id){
+        search_sequence <- search_tables[i, "sequence"]
+        search_id <- search_tables[i, "id"]
+        result <- sequence_reads_match_count(search_sequence, reads, qualities)
+        counts <- sapply(result, function(x) {
+            return(x$count)
+        })
+        mean_qualities <- sapply(result, function(x) {
+            return(paste(x$mean_quality, collapse = ","))
+        })
+        indexes <- sapply(result, function(x){
+            return(paste(x$indexes, collapse = ","))
+        })
+        result_df <- data.frame(
+            search_id = search_id,
+            sequence = search_sequence,
+            reads = names(reads),
+            raw_match = counts,
+            mean_qualities = mean_qualities,
+            indexes = indexes
+        )
+        if (output_temp) {
+            result_file <- file.path(result_folder,
+            paste0(id, "_", search_id, ".csv"))
+            write.csv(result_df, result_file, row.names = FALSE)
+        }
+        return(result_df)
+    }, output_temp = output_temp_result, search_tables = search_tables, result_folder = temp_result_folder,
+    id = ID, reads = all_reads, qualities = all_qualities, BPPARAM = bp)
     if (progress) {
         bp$progressbar <- old_pr
     }
@@ -466,18 +575,19 @@ get_all_process_methods <- function(process_name = ""){
 process_kmer_result <- function(partial_result, search_table, min_match_per_read = 1, ...) {
     result <- list()
     kmer_only <- partial_result
+    data.table::setDF(kmer_only)
     for (gene in unique(search_table[search_table$type == "KMER","result"])) {
         total_searched <- nrow(search_table[search_table$type == "KMER" & search_table$result == gene,])
         
         # Discard reads with less than min_match_per_read
-        all_reads <- unlist(strsplit(kmer_only[kmer_only$result == gene, "reads"], split = ";|,"))
-        n_match_in_read <- table(kmer_only[kmer_only$result == gene, "reads"])
+        all_reads <- unlist(strsplit(unlist(kmer_only[kmer_only$result == gene, "reads"]), split = ";|,"))
+        n_match_in_read <- table(all_reads)
         filtered_reads <- names(n_match_in_read[n_match_in_read >= min_match_per_read])
-        filtered_index <- apply(sapply(filtered_reads, grepl, x= kmer_only$reads), 1, sum) == length(filtered_reads)
+        filtered_index <- apply(sapply(filtered_reads, grepl, x= kmer_only$reads), 1, sum) > 0
         kmer_only2 <- kmer_only[kmer_only$result == gene & filtered_index, ]
         
         prop <- length(unique(kmer_only2[kmer_only2$result == gene, "sequence"])) / total_searched
-        r_count <- length(unique(unlist(strsplit(kmer_only2[kmer_only2$result == gene, "reads"], split = ";|,"))))
+        r_count <- length(unique(unlist(strsplit(unlist(kmer_only2[kmer_only2$result == gene, "reads"]), split = ";|,"))))
         result[[gene]] <- data.frame(type = "KMER", rank = 1, result = gene, reads_count = r_count,
             proportion_matched = prop, pass_filter = prop >= 0.8, proportion_scheme_found = prop, details = NA)
     }
@@ -531,6 +641,14 @@ remove_snp_conflict <- function(result, count_measure = "n_reads") {
 #' - proportion_snps_found: the proportion of SNPs found without conflict
 #' @export
 process_snp_result <- function(partial_result, search_table, count_measure = "n_reads", ...) {
+    split_tags <- function(tags, as = "vector", split = ";|,"){
+        result <- strsplit(tags, split = split)
+        if (as == "vector"){
+            return(unlist(result))
+        }
+        return(result)
+    }
+
     snp_only <- partial_result
     snp_only <- remove_snp_conflict(snp_only, count_measure = count_measure)
 
@@ -540,32 +658,33 @@ process_snp_result <- function(partial_result, search_table, count_measure = "n_
     searched_snps <- search_table[search_table$type == "SNP", "id"]
     searched_snps_id <- sapply(strsplit(searched_snps, split = "_"), `[`, 1)
 
-    cc_result <- table(unlist(sapply(snp_only[, "result"], strsplit, split = ";|,")))
+    split_result <- unlist(sapply(sapply(snp_only[, "result"], strsplit, split = ";|,"), unique))
+    # tags counting
+    cc_result <- table(split_result)
     cc_result <- cc_result[order(cc_result, decreasing = TRUE)]
     
+    # Reads containing the tag
     r_count <- sapply(names(cc_result), function(cc){
         temp <- length(
-            which(grepl(cc, unlist(snp_only$result))
-                == TRUE)
+            which(sapply(cc, "%in%", x = split_result) == TRUE)
         )
         return(temp)
     })
 
     stopifnot(names(r_count) == names(cc_result))
     setDF(snp_only)
-    prop <- sapply(names(cc_result), function(cc){
-        temp <- length(
-            unique(snp_only[grepl(cc, unlist(snp_only$result)),"sequence"])    
-        ) / length(
-            which(grepl(cc, unlist(search_table$result))
-                == TRUE)
-        )
-        return(temp)
-    })
+    avail_result_tags <- split_tags(snp_only$result, as = "list")
+    all_result_tags <- split_tags(search_table$result, as = "list")
+    n_all <- length(unique(searched_snps_id))
+    prop <- cc_result / n_all
+
     stopifnot(names(prop) == names(cc_result))
 
     read_count <- sapply(names(cc_result), function(cc){
-        sum_n_reads <- sum(snp_only[grepl(cc, unlist(snp_only$result)),"n_reads"])
+        row_id <- sapply(avail_result_tags, function(x) {
+            return(cc %in% x)
+        })
+        sum_n_reads <- sum(snp_only[row_id,"n_reads"])
         return(sum_n_reads)
     })
 
@@ -584,3 +703,4 @@ process_snp_result <- function(partial_result, search_table, count_measure = "n_
         )
     )
 }
+
